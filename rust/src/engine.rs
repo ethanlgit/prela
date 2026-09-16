@@ -1544,6 +1544,20 @@ pub trait QueryExt: IntoQuery + Sized {
     }
 
     #[inline(always)]
+    fn select_gt<V: Copy>(
+        self,
+        s: &SortedIdx<ROf<Self>, V>,
+    ) -> Compose<Self::Q, Above<'_, ROf<Self>, V>>
+    where
+        ROf<Self>: Ord + Hash,
+    {
+        Compose {
+            a: self.iq(),
+            b: Above(s),
+        }
+    }
+
+    #[inline(always)]
     fn inv(self) -> InvStream<Self::Q>
     where
         ROf<Self>: Eq + Hash,
@@ -1918,6 +1932,21 @@ mod tests {
     fn inv_stream() {
         let f = films();
         assert_eq!(drive_all(&(&f).inv()), vec![(10, 0), (20, 1), (30, 2)]);
+    }
+
+    #[test]
+    fn select_gt_sorted_idx() {
+        let s = VecRel::from_pairs(4, [(0, 100), (3, 300), (1, 200), (2, 250)])
+            .collect::<SortedIdx<_, _>>();
+        let lo = VecRel::from_pairs(2, [(0, 0), (1, 2)]);
+        assert_eq!(
+            drive_all(&(&lo).select_gt(&s)),
+            vec![(0, 200), (0, 250), (0, 300), (1, 300)]
+        );
+        assert!((&lo).select_gt(&s).member(1));
+        assert!(!(&lo).select_gt(&s).probe_any(1, |v| v < 300));
+        let empty = VecRel::from_pairs(1, [(0, 3)]);
+        assert!(!(&empty).select_gt(&s).member(0));
     }
 
     #[test]
