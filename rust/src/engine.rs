@@ -923,6 +923,45 @@ impl<A: Probe, B: Probe<D = A::D>> Probe for Prod<A, B> {
     }
 }
 
+// ===== Opt ===================
+
+pub struct Opt<Q> {
+    pub q: Q,
+}
+
+impl<Q: Query> Query for Opt<Q> {
+    type D = Q::D;
+    type R = Option<Q::R>;
+}
+impl<Q: Probe> Member for Opt<Q> {
+    #[inline(always)]
+    fn member(&self, _: Q::D) -> bool {
+        true
+    }
+}
+impl<Q: Probe> Probe for Opt<Q> {
+    #[inline(always)]
+    fn probe<K: FnMut(Option<Q::R>)>(&self, x: Q::D, mut k: K) {
+        let mut any = false;
+        self.q.probe(x, |r| {
+            any = true;
+            k(Some(r))
+        });
+        if !any {
+            k(None)
+        }
+    }
+    #[inline(always)]
+    fn probe_any<K: FnMut(Option<Q::R>) -> bool>(&self, x: Q::D, mut k: K) -> bool {
+        let mut any = false;
+        let hit = self.q.probe_any(x, |r| {
+            any = true;
+            k(Some(r))
+        });
+        if any { hit } else { k(None) }
+    }
+}
+
 // ===== InvStream — `q'` in drive position =========
 
 pub struct InvStream<Q> {
@@ -1476,6 +1515,14 @@ pub trait QueryExt: IntoQuery + Sized {
     }
 
     #[inline(always)]
+    fn opt(self) -> Opt<Self::Q>
+    where
+        Self::Q: Probe,
+    {
+        Opt { q: self.iq() }
+    }
+
+    #[inline(always)]
     fn or<B: IntoQuery>(self, b: B) -> Disj<Self::Q, B::Q>
     where
         B::Q: Query<D = DOf<Self>>,
@@ -1875,6 +1922,40 @@ mod tests {
         assert_eq!(drive_all(&cd), vec![(7, 2), (8, 1)]);
         // scalar
         assert_eq!((&f).unwrap_fold(0usize, |a, v| a + v), 60);
+    }
+
+    #[test]
+    fn opt_keys_null_group() {
+        let f = films();
+        let c = cast();
+        let fs = Universe::new(3);
+
+        let mut got = Vec::new();
+        (&c).opt().probe(0, |v| got.push(v));
+        (&c).opt().probe(1, |v| got.push(v));
+        assert_eq!(got, vec![Some(7), Some(8), None]);
+        assert!((&c).opt().member(1));
+        assert!((&c).opt().probe_any(1, |v| v.is_none()));
+        assert!(!(&c).opt().probe_any(0, |v| v.is_none()));
+        assert!((&c).opt().probe_any(0, |v| v == Some(8)));
+
+        assert_eq!(drive_all(&fs.group_by(&c).fold(0i64, |a, _| a + 1)), vec![(7, 2), (8, 1)]);
+        assert_eq!(
+            drive_all(&fs.group_by((&c).opt()).fold(0i64, |a, _| a + 1)),
+            vec![(None, 1), (Some(7), 2), (Some(8), 1)]
+        );
+
+        let big = (&f).filt(|v| v > 15);
+        let two = fs.group_by((&c).opt().and(big.opt())).fold(0i64, |a, _| a + 1);
+        assert_eq!(
+            drive_all(&two),
+            vec![
+                ((None, Some(20)), 1),
+                ((Some(7), None), 1),
+                ((Some(7), Some(30)), 1),
+                ((Some(8), None), 1),
+            ]
+        );
     }
 
     #[test]
