@@ -1078,6 +1078,54 @@ impl<D: Copy + Eq + Hash> Probe for MatSet<D> {
     }
 }
 
+pub struct SortedIdx<K: Copy + Ord, V: Copy> {
+    pub pairs: Vec<(K, V)>,
+}
+
+impl<Q: Drive> FromQuery<Q> for SortedIdx<Q::D, Q::R>
+where
+    Q::D: Ord,
+{
+    fn from_rel(q: Q) -> Self {
+        let mut pairs = Vec::new();
+        q.drive(|k, v| pairs.push((k, v)));
+        pairs.sort_by(|a, b| a.0.cmp(&b.0));
+        SortedIdx { pairs }
+    }
+}
+
+pub struct Above<'a, K: Copy + Ord, V: Copy>(&'a SortedIdx<K, V>);
+
+impl<K: Copy + Ord, V: Copy> Above<'_, K, V> {
+    #[inline(always)]
+    fn tail(&self, x: K) -> &[(K, V)] {
+        let i = self.0.pairs.partition_point(|p| p.0 <= x);
+        &self.0.pairs[i..]
+    }
+}
+impl<K: Copy + Ord + Hash, V: Copy> Query for Above<'_, K, V> {
+    type D = K;
+    type R = V;
+}
+impl<K: Copy + Ord + Hash, V: Copy> Member for Above<'_, K, V> {
+    #[inline(always)]
+    fn member(&self, x: K) -> bool {
+        self.0.pairs.last().is_some_and(|p| p.0 > x)
+    }
+}
+impl<K: Copy + Ord + Hash, V: Copy> Probe for Above<'_, K, V> {
+    #[inline(always)]
+    fn probe<F: FnMut(V)>(&self, x: K, mut k: F) {
+        for &(_, v) in self.tail(x) {
+            k(v);
+        }
+    }
+    #[inline(always)]
+    fn probe_any<F: FnMut(V) -> bool>(&self, x: K, mut k: F) -> bool {
+        self.tail(x).iter().any(|&(_, v)| k(v))
+    }
+}
+
 // ===== Bitset — `Vec<u64>`-backed dense identity relation ===============
 //
 // Drop-in replacement for `MatSet` when the membership domain is a
