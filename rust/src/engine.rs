@@ -1199,17 +1199,17 @@ impl<D: Dense> UnivSize<D> for SparseUniverse<D> {
 
 // ===== GroupBy ==============
 
-pub struct GroupBy<R, S> {
-    pub key: R,
+pub struct GroupBy<K, S> {
+    pub key: K,
     pub set: S,
 }
 
-impl<R: Query, S: Query<R = R::D>> Query for GroupBy<R, S>
+impl<K: Query, S: Query<R = K::D>> Query for GroupBy<K, S>
 where
-    R::R: Eq + Hash,
+    K::R: Eq + Hash,
 {
-    type D = R::R;
-    type R = S::R;
+    type D = K::R; // key
+    type R = S::R; // set
 }
 impl<R: Probe, S: Drive<R = R::D>> Drive for GroupBy<R, S>
 where
