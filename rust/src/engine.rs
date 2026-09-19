@@ -1060,6 +1060,14 @@ impl<D: Copy + Eq + Hash> Query for MatSet<D> {
     type D = D;
     type R = D;
 }
+impl<D: Copy + Eq + Hash> Drive for MatSet<D> {
+    #[inline(always)]
+    fn drive<K: FnMut(D, D)>(&self, mut k: K) {
+        for &d in &self.set {
+            k(d, d);
+        }
+    }
+}
 impl<D: Copy + Eq + Hash> Member for MatSet<D> {
     #[inline(always)]
     fn member(&self, x: D) -> bool {
