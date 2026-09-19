@@ -1635,6 +1635,59 @@ impl<Q: Probe, F: Fn(Q::R) -> S, S: Copy> Probe for Map<Q, F, S> {
     }
 }
 
+pub struct FlatMap<Q, F, I> {
+    pub q: Q,
+    pub f: F,
+    _phantom: PhantomData<I>,
+}
+
+impl<Q: Query, F: Fn(Q::R) -> I, I: IntoIterator> Query for FlatMap<Q, F, I>
+where
+    I::Item: Copy,
+{
+    type D = Q::D;
+    type R = I::Item;
+}
+impl<Q: Drive, F: Fn(Q::R) -> I, I: IntoIterator> Drive for FlatMap<Q, F, I>
+where
+    I::Item: Copy,
+{
+    #[inline(always)]
+    fn drive<K: FnMut(Q::D, I::Item)>(&self, mut k: K) {
+        self.q.drive(|d, v| {
+            for s in (self.f)(v) {
+                k(d, s)
+            }
+        });
+    }
+}
+impl<Q: Probe, F: Fn(Q::R) -> I, I: IntoIterator> Member for FlatMap<Q, F, I>
+where
+    I::Item: Copy,
+{
+    #[inline(always)]
+    fn member(&self, x: Q::D) -> bool {
+        self.probe_any(x, |_| true)
+    }
+}
+impl<Q: Probe, F: Fn(Q::R) -> I, I: IntoIterator> Probe for FlatMap<Q, F, I>
+where
+    I::Item: Copy,
+{
+    #[inline(always)]
+    fn probe<K: FnMut(I::Item)>(&self, x: Q::D, mut k: K) {
+        self.q.probe(x, |v| {
+            for s in (self.f)(v) {
+                k(s)
+            }
+        });
+    }
+    #[inline(always)]
+    fn probe_any<K: FnMut(I::Item) -> bool>(&self, x: Q::D, mut k: K) -> bool {
+        self.q.probe_any(x, |v| (self.f)(v).into_iter().any(&mut k))
+    }
+}
+
 // ==================
 // OPERATORS
 // ==================
@@ -1993,6 +2046,19 @@ pub trait QueryExt: IntoQuery + Sized {
     }
 
     #[inline(always)]
+    fn flat_map<F: Fn(ROf<Self>) -> I, I: IntoIterator>(self, f: F) -> FlatMap<Self::Q, F, I>
+    where
+        I::Item: Copy,
+    {
+        FlatMap {
+            q: self.iq(),
+            f,
+            _phantom: PhantomData,
+        }
+    }
+
+
+    #[inline(always)]
     fn unwrap_fold<OP: Fn(S, ROf<Self>) -> S, S: Copy>(self, init: S, op: OP) -> S
     where
         Self::Q: Drive,
@@ -2145,14 +2211,19 @@ mod tests {
         assert!(!(&c).opt().probe_any(0, |v| v.is_none()));
         assert!((&c).opt().probe_any(0, |v| v == Some(8)));
 
-        assert_eq!(drive_all(&fs.group_by(&c).fold(0i64, |a, _| a + 1)), vec![(7, 2), (8, 1)]);
+        assert_eq!(
+            drive_all(&fs.group_by(&c).fold(0i64, |a, _| a + 1)),
+            vec![(7, 2), (8, 1)]
+        );
         assert_eq!(
             drive_all(&fs.group_by((&c).opt()).fold(0i64, |a, _| a + 1)),
             vec![(None, 1), (Some(7), 2), (Some(8), 1)]
         );
 
         let big = (&f).filt(|v| v > 15);
-        let two = fs.group_by((&c).opt().and(big.opt())).fold(0i64, |a, _| a + 1);
+        let two = fs
+            .group_by((&c).opt().and(big.opt()))
+            .fold(0i64, |a, _| a + 1);
         assert_eq!(
             drive_all(&two),
             vec![
