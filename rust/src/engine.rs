@@ -1688,6 +1688,43 @@ where
     }
 }
 
+pub struct Scan<X, S, P> {
+    pub s: S,
+    pub p: P,
+    _x: PhantomData<X>,
+}
+
+impl<X: Copy + Eq + Hash, S: Query, P: Fn(X, S::D) -> bool> Query for Scan<X, S, P> {
+    type D = X;
+    type R = S::R;
+}
+impl<X: Copy + Eq + Hash, S: Drive, P: Fn(X, S::D) -> bool> Member for Scan<X, S, P> {
+    #[inline(always)]
+    fn member(&self, x: X) -> bool {
+        self.probe_any(x, |_| true)
+    }
+}
+impl<X: Copy + Eq + Hash, S: Drive, P: Fn(X, S::D) -> bool> Probe for Scan<X, S, P> {
+    #[inline(always)]
+    fn probe<K: FnMut(S::R)>(&self, x: X, mut k: K) {
+        self.s.drive(|key, v| {
+            if (self.p)(x, key) {
+                k(v)
+            }
+        });
+    }
+    #[inline(always)]
+    fn probe_any<K: FnMut(S::R) -> bool>(&self, x: X, mut k: K) -> bool {
+        let mut hit = false;
+        self.s.drive(|key, v| {
+            if !hit && (self.p)(x, key) {
+                hit = k(v);
+            }
+        });
+        hit
+    }
+}
+
 // ==================
 // OPERATORS
 // ==================
@@ -2057,6 +2094,25 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
+    #[inline(always)]
+    fn select_where<S: IntoQuery, P: Fn(ROf<Self>, DOf<S>) -> bool>(
+        self,
+        s: S,
+        p: P,
+    ) -> Compose<Self::Q, Scan<ROf<Self>, S::Q, P>>
+    where
+        ROf<Self>: Eq + Hash,
+        S::Q: Drive,
+    {
+        Compose {
+            a: self.iq(),
+            b: Scan {
+                s: s.iq(),
+                p,
+                _x: PhantomData,
+            },
+        }
+    }
 
     #[inline(always)]
     fn unwrap_fold<OP: Fn(S, ROf<Self>) -> S, S: Copy>(self, init: S, op: OP) -> S
@@ -2142,6 +2198,27 @@ mod tests {
         assert!(!(&lo).select_gt(&s).probe_any(1, |v| v < 300));
         let empty = VecRel::from_pairs(1, [(0, 3)]);
         assert!(!(&empty).select_gt(&s).member(0));
+    }
+
+    #[test]
+    fn flat_map_and_select_where() {
+        let words: VecRel<usize, &'static str> =
+            VecRel::from_pairs(2, [(0, "<ab><cd>"), (1, "<b>")]);
+        let split = (&words).flat_map(|t: &'static str| t[1..t.len() - 1].split("><"));
+        assert_eq!(drive_all(&split), vec![(0, "ab"), (0, "cd"), (1, "b")]);
+        assert!(split.member(1) && split.probe_any(0, |w| w == "cd"));
+
+        let names: VecRel<usize, &'static str> =
+            VecRel::from_pairs(3, [(0, "a"), (1, "b"), (2, "d")]);
+        let hits = (&words)
+            .flat_map(|t: &'static str| t[1..t.len() - 1].split("><"))
+            .select_where((&names).inv(), |w: &str, n: &str| w.contains(n));
+        assert_eq!(drive_all(&hits), vec![(0, 0), (0, 1), (0, 2), (1, 1)]);
+        assert!(hits.member(1));
+        assert!(!hits.probe_any(1, |t| t == 0));
+
+        let set: MatSet<usize> = (&names).inv().collect();
+        assert_eq!(drive_all(&set), vec![(0, 0), (1, 1), (2, 2)]);
     }
 
     #[test]
