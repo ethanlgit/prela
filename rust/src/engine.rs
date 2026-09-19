@@ -1445,13 +1445,11 @@ impl<Q: Probe, F: Fn(Q::R) -> S, S: Copy> Probe for Map<Q, F, S> {
 // and consume their input, exactly like Prela's `build_*` inside `prepare`.
 
 pub trait QueryExt: IntoQuery + Sized {
-    /// Relational composition. Walks `self`'s pairs `(x, y)` and probes
-    /// `b` at each `y`, yielding `(x, z)` for every `z` in `b`'s range at
-    /// `y`. Requires `b`'s domain to equal `self`'s range
-    /// (`B::Q: Query<D = ROf<Self>>`). Subsumes both SQL's column
-    /// projection and its foreign-key `JOIN`: a foreign-key field is just
-    /// another relation to compose with, so chaining `.select()` calls
-    /// walks a chain of joins.
+    /// Relational composition. Given relations `a` and `b`, `a.select(b)`
+    /// matches every tuple (x, y<sub>a</sub>) in `a` with all tuples
+    /// (y<sub>b</sub>, z) in `b` such that y<sub>a</sub> = y<sub>b</sub>,
+    /// and produces a tuple `(x, z)` for each match. In relational
+    /// algebra: π<sub>a.1, b.2</sub>(a ⋈<sub>a.2 = b.1</sub> b).
     ///
     /// # Examples
     ///
@@ -1476,9 +1474,10 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Inverts a relation: every `(x, y)` pair becomes `(y, x)`. Requires
-    /// `ROf<Self>: Eq + Hash`, since the new domain (`self`'s old range)
-    /// must be hashable to build the reverse lookup.
+    /// Invert. Given relation `a` (x<sub>a</sub>, y<sub>a</sub>), where
+    /// y<sub>a</sub> is hashable, `a.inv()` swaps columns x<sub>a</sub>
+    /// and y<sub>a</sub>, producing a new relation (y<sub>a</sub>,
+    /// x<sub>a</sub>). In relational algebra: π<sub>a.2, a.1</sub>(a).
     ///
     /// # Examples
     ///
@@ -1499,12 +1498,13 @@ pub trait QueryExt: IntoQuery + Sized {
         InvStream { q: self.iq() }
     }
 
-    /// Pairs `self` with `b` on a shared domain: `(x, y)` from `self` and
-    /// `(x, z)` from `b` become `(x, (y, z))`. Requires `b`'s domain to
-    /// equal `self`'s domain (`B::Q: Query<D = DOf<Self>>`) — unlike
-    /// [`QueryExt::select`], which composes on `self`'s *range*. Used
-    /// both as logical AND (pairing two predicates over the same domain)
-    /// and as multi-column projection (pairing two output columns).
+    /// Conjunction. Given relations `a` (x<sub>a</sub>, y<sub>a</sub>)
+    /// and `b` (x<sub>b</sub>, y<sub>b</sub>), where type(x<sub>a</sub>)
+    /// = type(x<sub>b</sub>), `a.and(b)` combines `a` and `b`, such that
+    /// x<sub>a</sub> = x<sub>b</sub>, and produces (x<sub>a</sub>,
+    /// (y<sub>a</sub>, y<sub>b</sub>)) for each match. Used both as
+    /// logical AND, and as multi-column projection. In relational
+    /// algebra: π<sub>a.1, a.2, b.2</sub>(a ⋈<sub>a.1 = b.1</sub> b).
     ///
     /// # Examples
     ///
@@ -1529,14 +1529,12 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Membership-only disjunction: answers whether `x` is in `self`'s
-    /// domain *or* `b`'s domain, without ever materializing a result
-    /// relation. Requires `b`'s domain to equal `self`'s domain
-    /// (`B::Q: Query<D = DOf<Self>>`), matching [`QueryExt::and`]. The
-    /// result only implements [`Member`], not [`Drive`]/[`Probe`] —
-    /// calling `.drive()`, `.select()`, or `.with()` on it is a compile
-    /// error by design. For a listable result, use [`QueryExt::union`]
-    /// instead.
+    /// Disjunction. Given relations `a` (x<sub>a</sub>, y<sub>a</sub>)
+    /// and `b` (x<sub>b</sub>, y<sub>b</sub>), `a.or(b)` checks for
+    /// membership, such that for any value `v`, `v` equals any
+    /// x<sub>a</sub> or `v` equals any x<sub>b</sub>, and produces
+    /// boolean value `True` if a match occurs, and `False` otherwise.
+    /// In relational algebra: π<sub>a.1</sub>(a) ∪ π<sub>b.1</sub>(b).
     ///
     /// # Examples
     ///
@@ -1559,10 +1557,13 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Value-bearing difference: keeps `self`'s pairs `(x, y)` where `x`
-    /// is *not* a member of `b`'s domain — SQL's `EXCEPT`/`NOT IN`.
-    /// Requires `b`'s domain to equal `self`'s domain
-    /// (`B::Q: Query<D = DOf<Self>>`).
+    /// Minus. Given relations `a` (x<sub>a</sub>, y<sub>a</sub>) and `b`
+    /// (x<sub>b</sub>, y<sub>b</sub>), where type(x<sub>a</sub>) =
+    /// type(x<sub>b</sub>), `a.minus(b)` filters `a`, such that
+    /// x<sub>a</sub> does not equal any x<sub>b</sub>, and produces
+    /// (x<sub>a</sub>, y<sub>a</sub>) unchanged for each pair that
+    /// satisfies the condition. In relational algebra: a ▷<sub>a.1 =
+    /// b.1</sub> b.
     ///
     /// # Examples
     ///
@@ -1585,11 +1586,12 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Concatenation: drives `self`, then `b`, with no deduplication —
-    /// SQL's `UNION ALL`, not `UNION`. Requires matching domain *and*
-    /// range (`B::Q: Query<D = DOf<Self>, R = ROf<Self>>`), stricter than
-    /// [`QueryExt::and`]/[`QueryExt::minus`], since the two sides must
-    /// produce interchangeable rows to be concatenated meaningfully.
+    /// Union. Given relations `a` (x<sub>a</sub>, y<sub>a</sub>) and `b`
+    /// (x<sub>b</sub>, y<sub>b</sub>), where type(x<sub>a</sub>) =
+    /// type(x<sub>b</sub>) and type(y<sub>a</sub>) = type(y<sub>b</sub>),
+    /// `a.union(b)` concatenates `a` and `b`, producing every pair from
+    /// `a`, then every pair from `b`, without deduplication. In
+    /// relational algebra: `c = a ⊎ b`.
     ///
     /// # Examples
     ///
@@ -1613,11 +1615,11 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Keeps pairs whose value equals `v`. All of [`QueryExt::eq`],
-    /// [`QueryExt::ne`], [`QueryExt::gt`], [`QueryExt::lt`],
-    /// [`QueryExt::ge`], [`QueryExt::le`] share this exact shape, a
-    /// one-line closure over `self`'s value, differing only in the
-    /// comparison operator inside.
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some value
+    /// `v`, `a.eq(v)` filters `a`, such that y<sub>a</sub> = `v`, and
+    /// produces (x, y<sub>a</sub>) unchanged for each pair that
+    /// satisfies the condition. In relational algebra: σ<sub>a.2 =
+    /// v</sub>(a).
     ///
     /// # Examples
     ///
@@ -1640,8 +1642,11 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Keeps pairs whose value is not equal to `v`. See [`QueryExt::eq`]
-    /// for the shape every comparator here shares.
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some value
+    /// `v`, `a.ne(v)` filters `a`, such that y<sub>a</sub> ≠ `v`, and
+    /// produces (x, y<sub>a</sub>) unchanged for each pair that
+    /// satisfies the condition. In relational algebra: σ<sub>a.2 ≠
+    /// v</sub>(a).
     ///
     /// # Examples
     ///
@@ -1665,8 +1670,11 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Keeps pairs whose value is greater than `v`. See [`QueryExt::eq`]
-    /// for the shape every comparator here shares.
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some value
+    /// `v`, `a.gt(v)` filters `a`, such that y<sub>a</sub> &gt; `v`, and
+    /// produces (x, y<sub>a</sub>) unchanged for each pair that
+    /// satisfies the condition. In relational algebra: σ<sub>a.2 &gt;
+    /// v</sub>(a).
     ///
     /// # Examples
     ///
@@ -1690,8 +1698,11 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Keeps pairs whose value is less than `v`. See [`QueryExt::eq`] for
-    /// the shape every comparator here shares.
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some value
+    /// `v`, `a.lt(v)` filters `a`, such that y<sub>a</sub> &lt; `v`, and
+    /// produces (x, y<sub>a</sub>) unchanged for each pair that
+    /// satisfies the condition. In relational algebra: σ<sub>a.2 &lt;
+    /// v</sub>(a).
     ///
     /// # Examples
     ///
@@ -1715,8 +1726,11 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Keeps pairs whose value is greater than or equal to `v`. See
-    /// [`QueryExt::eq`] for the shape every comparator here shares.
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some value
+    /// `v`, `a.ge(v)` filters `a`, such that y<sub>a</sub> ≥ `v`, and
+    /// produces (x, y<sub>a</sub>) unchanged for each pair that
+    /// satisfies the condition. In relational algebra: σ<sub>a.2 ≥
+    /// v</sub>(a).
     ///
     /// # Examples
     ///
@@ -1740,8 +1754,11 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Keeps pairs whose value is less than or equal to `v`. See
-    /// [`QueryExt::eq`] for the shape every comparator here shares.
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some value
+    /// `v`, `a.le(v)` filters `a`, such that y<sub>a</sub> ≤ `v`, and
+    /// produces (x, y<sub>a</sub>) unchanged for each pair that
+    /// satisfies the condition. In relational algebra: σ<sub>a.2 ≤
+    /// v</sub>(a).
     ///
     /// # Examples
     ///
@@ -1765,9 +1782,11 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Keeps pairs whose value is present in `vs`, checked by a linear
-    /// scan. `vs` must already be a `Vec`; for any `IntoIterator`, use
-    /// [`QueryExt::is_in`], which this is a special case of.
+    /// Selection. Given relation `a` (x<sub>a</sub>, y<sub>a</sub>) and
+    /// a list of values `vs`, `a.in_v(vs)` filters `a`, such that
+    /// y<sub>a</sub> is in `vs`, producing (x<sub>a</sub>, y<sub>a</sub>)
+    /// unchanged for each pair that satisfies the condition. In
+    /// relational algebra: σ<sub>a.2 ∈ vs</sub>(a).
     ///
     /// # Examples
     ///
@@ -1823,12 +1842,11 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Restriction (semijoin). Keeps a pair `(x, y)` from `self` iff `y`
-    /// is a member of `s`'s domain; `s`'s own values never appear in the
-    /// output; `self`'s domain and range are unchanged. Requires `s`'s
-    /// domain to equal `self`'s range (`S::Q: Member<D = ROf<Self>>`).
-    /// For fetching `s`'s columns instead of merely filtering by them,
-    /// see [`QueryExt::select`].
+    /// Restriction using semijoin. Given relation `a` (x, y<sub>a</sub>)
+    /// and relation `b` (y<sub>b</sub>, z), `a.with(b)` filters `a` by
+    /// `b`, such that y<sub>a</sub> = y<sub>b</sub>, and produces (x,
+    /// y<sub>a</sub>) unchanged for each match. In relational algebra:
+    /// a ⋉<sub>a.2 = b.1</sub> b.
     ///
     /// # Examples
     ///
@@ -1852,11 +1870,11 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Keeps pairs whose string value matches the regex `re`. Requires
-    /// `self`'s range to actually be `&'static str`
-    /// (`Self::Q: Query<R = &'static str>`). The pattern is compiled
-    /// once, up front, before the closure runs, not re-parsed per row.
-    /// See [`QueryExt::nrx`] for the negated form.
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some regex
+    /// pattern `s`, `a.rx(s)` filters `a`, such that y<sub>a</sub>
+    /// matches `s`, and produces (x, y<sub>a</sub>) unchanged for each
+    /// pair that satisfies the condition. In relational algebra:
+    /// σ<sub>a.2 ~ s</sub>(a).
     ///
     /// # Examples
     ///
@@ -1880,8 +1898,11 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Keeps pairs whose string value does *not* match the regex `re`.
-    /// See [`QueryExt::rx`] for the positive form.
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some regex
+    /// pattern `s`, `a.nrx(s)` filters `a`, such that y<sub>a</sub> does
+    /// not match `s`, and produces (x, y<sub>a</sub>) unchanged for each
+    /// pair that satisfies the condition. In relational algebra:
+    /// σ<sub>a.2 ≁ s</sub>(a).
     ///
     /// # Examples
     ///
@@ -1906,12 +1927,11 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Escape hatch: keeps pairs where the arbitrary closure `f` returns
-    /// `true`, applied directly to `self`'s value. Every named comparator
-    /// above is really just a convenience wrapper around this — the only
-    /// reason to reach for `.filt()` instead is when the check isn't
-    /// against a fixed constant, e.g. comparing two columns paired up via
-    /// [`QueryExt::and`].
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and a predicate
+    /// function `f`, `a.filt(f)` filters `a`, such that f(y<sub>a</sub>)
+    /// = true, and produces (x, y<sub>a</sub>) unchanged for each pair
+    /// that satisfies the condition. In relational algebra:
+    /// σ<sub>f(a.2)</sub>(a).
     ///
     /// # Examples
     ///
@@ -1928,9 +1948,11 @@ pub trait QueryExt: IntoQuery + Sized {
         Filter { a: self.iq(), p: f }
     }
 
-    /// Half-open range `[lo, hi)` — inclusive of `lo`, exclusive of `hi`
-    /// (Julia `during(lo, hi)`). See [`QueryExt::between`] for the closed
-    /// variant; the two differ by exactly one comparison operator.
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some range
+    /// `(low, high)`, `a.during(low, high)` filters `a`, such that
+    /// `low` ≤ y<sub>a</sub> &lt; `high`, and produces (x, y<sub>a</sub>)
+    /// unchanged for each pair that satisfies the condition. In
+    /// relational algebra: σ<sub>low ≤ a.2 &lt; high</sub>(a).
     ///
     /// # Examples
     ///
@@ -1954,9 +1976,11 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Closed range `[lo, hi]` — inclusive of both ends (Julia
-    /// `lo..hi`), matching SQL's `BETWEEN` exactly. See
-    /// [`QueryExt::during`] for the half-open variant.
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some range
+    /// `(low, high)`, `a.between(low, high)` filters `a`, such that
+    /// `low` ≤ y<sub>a</sub> ≤ `high`, and produces (x, y<sub>a</sub>)
+    /// unchanged for each pair that satisfies the condition. In
+    /// relational algebra: σ<sub>low ≤ a.2 ≤ high</sub>(a).
     ///
     /// # Examples
     ///
