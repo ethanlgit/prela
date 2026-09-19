@@ -1656,6 +1656,8 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
+    // b = SortedIdx(c)
+    // a.select_gt(b)
     #[inline(always)]
     fn select_gt<V: Copy>(
         self,
