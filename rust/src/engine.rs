@@ -1,6 +1,7 @@
 use ahash::{AHashMap as HashMap, AHashSet as HashSet};
 use regex::Regex;
 use smallvec::SmallVec;
+use std::cmp::Ordering;
 use std::hash::Hash;
 use std::marker::PhantomData;
 
@@ -1380,6 +1381,118 @@ impl<D: Copy + Eq + Hash, S: Copy> Probe for Fold<D, S> {
     }
 }
 
+// ===== Window ==================
+
+pub struct Window<D: Copy + Eq + Hash, S: Copy> {
+    pub cache: HashMap<D, SVec<S>>,
+}
+
+impl<D: Copy + Eq + Hash + Ord, S: Copy> Window<D, S> {
+    pub fn build<Q, O, C, F>(q: Q, order: O, cmp: C, f: F) -> Self
+    where
+        Q: Drive<R = D>,
+        C: Fn(&O::R, &O::R) -> Ordering,
+        O: Probe<D = D>,
+        F: Fn(&[(O::R, D)], &mut Vec<S>),
+    {
+        let mut buf: HashMap<Q::D, SVec<(O::R, D)>> = HashMap::new();
+        q.drive(|k, x| order.probe(x, |o| buf.entry(k).or_default().push((o, x))));
+        let mut cache: HashMap<D, SVec<S>> = HashMap::new();
+        let mut out = Vec::new();
+        for (_, mut g) in buf {
+            // sort g by Order then row id
+            g.sort_unstable_by(|a, b| cmp(&a.0, &b.0).then(a.1.cmp(&b.1)));
+            out.clear();
+            f(&g, &mut out);
+            assert_eq!(
+                out.len(),
+                g.len(),
+                "window function must emit one value per row"
+            );
+            for (&(_, x), &s) in g.iter().zip(&out) {
+                cache.entry(x).or_default().push(s);
+            }
+        }
+        Window { cache }
+    }
+}
+
+pub fn row_number<O, R>(g: &[(O, R)], out: &mut Vec<i64>) {
+    out.extend(1..=g.len() as i64);
+}
+
+pub fn rank<O: PartialEq, R>(g: &[(O, R)], out: &mut Vec<i64>) {
+    for i in 0..g.len() {
+        let r = if i > 0 && g[i].0 == g[i - 1].0 {
+            out[i - 1]
+        } else {
+            i as i64 + 1
+        };
+        out.push(r);
+    }
+}
+
+pub fn dense_rank<O: PartialEq, R>(g: &[(O, R)], out: &mut Vec<i64>) {
+    for i in 0..g.len() {
+        let r = match i {
+            0 => 1,
+            _ if g[i].0 == g[i - 1].0 => out[i - 1],
+            _ => out[i - 1] + 1,
+        };
+        out.push(r);
+    }
+}
+
+pub fn lag<O: Copy, R>(g: &[(O, R)], out: &mut Vec<Option<O>>) {
+    out.push(None);
+    out.extend(g.windows(2).map(|w| Some(w[0].0)));
+    out.truncate(g.len());
+}
+
+pub fn lead<O: Copy, R>(g: &[(O, R)], out: &mut Vec<Option<O>>) {
+    out.extend(g.windows(2).map(|w| Some(w[1].0)));
+    if !g.is_empty() {
+        out.push(None);
+    }
+}
+
+impl<D: Copy + Eq + Hash, S: Copy> Query for Window<D, S> {
+    type D = D;
+    type R = S;
+}
+impl<D: Copy + Eq + Hash, S: Copy> Drive for Window<D, S> {
+    #[inline(always)]
+    fn drive<K: FnMut(D, S)>(&self, mut k: K) {
+        for (&d, ss) in &self.cache {
+            for &s in ss {
+                k(d, s);
+            }
+        }
+    }
+}
+impl<D: Copy + Eq + Hash, S: Copy> Member for Window<D, S> {
+    #[inline(always)]
+    fn member(&self, x: D) -> bool {
+        self.cache.contains_key(&x)
+    }
+}
+impl<D: Copy + Eq + Hash, S: Copy> Probe for Window<D, S> {
+    #[inline(always)]
+    fn probe<K: FnMut(S)>(&self, x: D, mut k: K) {
+        if let Some(ss) = self.cache.get(&x) {
+            for &s in ss {
+                k(s);
+            }
+        }
+    }
+    #[inline(always)]
+    fn probe_any<K: FnMut(S) -> bool>(&self, x: D, mut k: K) -> bool {
+        self.cache
+            .get(&x)
+            .is_some_and(|ss| ss.iter().any(|&s| k(s)))
+    }
+}
+
 // ===== DenseFold ==================
 //
 // Drop-in replacement for `Fold` when `D = usize` and the key range is a
@@ -1842,6 +1955,20 @@ pub trait QueryExt: IntoQuery + Sized {
         DenseFold::build_outer(self.iq(), n, init, op)
     }
 
+    #[inline(always)]
+    fn window<O, C, F, S>(self, order: O, cmp: C, f: F) -> Window<ROf<Self>, S>
+    where
+        Self::Q: Drive,
+        ROf<Self>: Ord + Hash,
+        O: IntoQuery,
+        O::Q: Probe<D = ROf<Self>>,
+        C: Fn(&ROf<O>, &ROf<O>) -> Ordering,
+        F: Fn(&[(ROf<O>, ROf<Self>)], &mut Vec<S>),
+        S: Copy,
+    {
+        Window::build(self.iq(), order.iq(), cmp, f)
+    }
+
     /// Count-distinct — the `length ∘ unique` instance of `.buf_fold`. The
     /// closure sorts + dedups the per-key SVec on finalization — much
     /// faster than a HashSet per group for the typical small-group case.
@@ -2080,6 +2207,63 @@ mod tests {
         // identity composes like any relation
         let f = films();
         assert_eq!(drive_all(&(&people).select(&f)), vec![(0, 10), (2, 30)]);
+    }
+
+    #[test]
+    fn window_ranks_within_partition() {
+        let part: VecRel<usize, usize> =
+            VecRel::from_pairs(5, [(0, 0), (1, 0), (2, 0), (3, 0), (4, 1)]);
+        let score: VecRel<usize, i64> =
+            VecRel::from_pairs(5, [(0, 5), (1, 5), (2, 3), (3, 9), (4, 1)]);
+        let rows = Universe::new(5);
+        let desc = |a: &i64, b: &i64| b.cmp(a);
+
+        let rn = rows.group_by(&part).window(&score, desc, row_number);
+        assert_eq!(drive_all(&rn), vec![(0, 2), (1, 3), (2, 4), (3, 1), (4, 1)]);
+        let rk = rows.group_by(&part).window(&score, desc, rank);
+        assert_eq!(drive_all(&rk), vec![(0, 2), (1, 2), (2, 4), (3, 1), (4, 1)]);
+        let dr = rows.group_by(&part).window(&score, desc, dense_rank);
+        assert_eq!(drive_all(&dr), vec![(0, 2), (1, 2), (2, 3), (3, 1), (4, 1)]);
+        let lg = rows.group_by(&part).window(&score, desc, lag);
+        assert_eq!(
+            drive_all(&lg),
+            vec![
+                (0, Some(9)),
+                (1, Some(5)),
+                (2, Some(5)),
+                (3, None),
+                (4, None)
+            ]
+        );
+        let ld = rows.group_by(&part).window(&score, desc, lead);
+        assert_eq!(
+            drive_all(&ld),
+            vec![
+                (0, Some(5)),
+                (1, Some(3)),
+                (2, None),
+                (3, Some(5)),
+                (4, None)
+            ]
+        );
+
+        let top2: Vec<_> = drive_all(&rows.with((&rn).le(2)))
+            .into_iter()
+            .map(|p| p.0)
+            .collect();
+        assert_eq!(top2, vec![0, 3, 4]);
+        assert!((&rn).member(2) && !(&rn).probe_any(2, |r| r <= 2));
+    }
+
+    #[test]
+    fn window_row_in_two_partitions() {
+        let f = films();
+        let c = cast();
+        let rn =
+            Universe::new(3)
+                .group_by(&c)
+                .window(&f, |a: &usize, b: &usize| b.cmp(a), row_number);
+        assert_eq!(drive_all(&rn), vec![(0, 1), (0, 2), (2, 1)]);
     }
 
     #[test]
