@@ -1743,6 +1743,24 @@ impl<X: Copy + Eq + Hash, S: Drive, P: Fn(X, S::D) -> bool> Probe for Scan<X, S,
 // and consume their input, exactly like prela's `build_*` inside `prepare`.
 
 pub trait QueryExt: IntoQuery + Sized {
+    /// Relational composition. Given relations `a` and `b`, `a.select(b)`
+    /// matches every tuple (x, y<sub>a</sub>) in `a` with all tuples
+    /// (y<sub>b</sub>, z) in `b` such that y<sub>a</sub> = y<sub>b</sub>,
+    /// and produces a tuple `(x, z)` for each match. In relational
+    /// algebra: π<sub>a.1, b.2</sub>(a ⋈<sub>a.2 = b.1</sub> b).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use prela::engine::*;
+    ///
+    /// let a = VecRel::new(vec![1, 2, 0]);
+    /// let b = VecRel::new(vec!["x", "y", "z"]);
+    /// let mut out = Vec::new();
+    /// a.select(&b).drive(|d, r| out.push((d, r)));
+    /// out.sort();
+    /// assert_eq!(out, vec![(0, "y"), (1, "z"), (2, "x")]);
+    /// ```
     #[inline(always)]
     fn select<B: IntoQuery>(self, b: B) -> Compose<Self::Q, B::Q>
     where
@@ -1770,6 +1788,22 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
+    /// Invert. Given relation `a` (x<sub>a</sub>, y<sub>a</sub>), where
+    /// y<sub>a</sub> is hashable, `a.inv()` swaps columns x<sub>a</sub>
+    /// and y<sub>a</sub>, producing a new relation (y<sub>a</sub>,
+    /// x<sub>a</sub>). In relational algebra: π<sub>a.2, a.1</sub>(a).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use prela::engine::*;
+    ///
+    /// let a = VecRel::new(vec![1, 2, 0]);
+    /// let mut out = Vec::new();
+    /// a.inv().drive(|d, r| out.push((d, r)));
+    /// out.sort();
+    /// assert_eq!(out, vec![(0, 2), (1, 0), (2, 1)]);
+    /// ```
     #[inline(always)]
     fn inv(self) -> InvStream<Self::Q>
     where
@@ -1778,6 +1812,26 @@ pub trait QueryExt: IntoQuery + Sized {
         InvStream { q: self.iq() }
     }
 
+    /// Conjunction. Given relations `a` (x<sub>a</sub>, y<sub>a</sub>)
+    /// and `b` (x<sub>b</sub>, y<sub>b</sub>), where type(x<sub>a</sub>)
+    /// = type(x<sub>b</sub>), `a.and(b)` combines `a` and `b`, such that
+    /// x<sub>a</sub> = x<sub>b</sub>, and produces (x<sub>a</sub>,
+    /// (y<sub>a</sub>, y<sub>b</sub>)) for each match. Used both as
+    /// logical AND, and as multi-column projection. In relational
+    /// algebra: π<sub>a.1, a.2, b.2</sub>(a ⋈<sub>a.1 = b.1</sub> b).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use prela::engine::*;
+    ///
+    /// let a = VecRel::new(vec![1, 2, 0]);
+    /// let b = VecRel::new(vec!["x", "y", "z"]);
+    /// let mut out = Vec::new();
+    /// a.and(&b).drive(|d, r| out.push((d, r)));
+    /// out.sort();
+    /// assert_eq!(out, vec![(0, (1, "x")), (1, (2, "y")), (2, (0, "z"))]);
+    /// ```
     #[inline(always)]
     fn and<B: IntoQuery>(self, b: B) -> Prod<Self::Q, B::Q>
     where
@@ -1797,6 +1851,23 @@ pub trait QueryExt: IntoQuery + Sized {
         Opt { q: self.iq() }
     }
 
+    /// Disjunction. Given relations `a` (x<sub>a</sub>, y<sub>a</sub>)
+    /// and `b` (x<sub>b</sub>, y<sub>b</sub>), `a.or(b)` checks for
+    /// membership, such that for any value `v`, `v` equals any
+    /// x<sub>a</sub> or `v` equals any x<sub>b</sub>, and produces
+    /// boolean value `True` if a match occurs, and `False` otherwise.
+    /// In relational algebra: π<sub>a.1</sub>(a) ∪ π<sub>b.1</sub>(b).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use prela::engine::*;
+    ///
+    /// let a = VecRel::new(vec![10, 20]);
+    /// let b = VecRel::new(vec![30, 40, 50]);
+    /// assert!((&a).or(&b).member(2));  // in b's domain {0, 1, 2}
+    /// assert!(!(&a).or(&b).member(5)); // in neither domain
+    /// ```
     #[inline(always)]
     fn or<B: IntoQuery>(self, b: B) -> Disj<Self::Q, B::Q>
     where
@@ -1808,6 +1879,24 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
+    /// Minus. Given relations `a` (x<sub>a</sub>, y<sub>a</sub>) and `b`
+    /// (x<sub>b</sub>, y<sub>b</sub>), where type(x<sub>a</sub>) =
+    /// type(x<sub>b</sub>), `a.minus(b)` filters `a`, such that
+    /// x<sub>a</sub> does not equal any x<sub>b</sub>, and produces
+    /// (x<sub>a</sub>, y<sub>a</sub>) unchanged for each pair that
+    /// satisfies the condition. In relational algebra: a ▷<sub>a.1 =
+    /// b.1</sub> b.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use prela::engine::*;
+    ///
+    /// let a: VecRel<usize, usize> = VecRel::new(vec![10, 20, 30]);
+    /// let mut out = Vec::new();
+    /// a.minus(Universe::new(2)).drive(|d, r| out.push((d, r)));
+    /// assert_eq!(out, vec![(2, 30)]); // keys 0, 1 dropped: both in {0, 1}
+    /// ```
     #[inline(always)]
     fn minus<B: IntoQuery>(self, b: B) -> Diff<Self::Q, B::Q>
     where
@@ -1819,6 +1908,24 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
+    /// Union. Given relations `a` (x<sub>a</sub>, y<sub>a</sub>) and `b`
+    /// (x<sub>b</sub>, y<sub>b</sub>), where type(x<sub>a</sub>) =
+    /// type(x<sub>b</sub>) and type(y<sub>a</sub>) = type(y<sub>b</sub>),
+    /// `a.union(b)` concatenates `a` and `b`, producing every pair from
+    /// `a`, then every pair from `b`, without deduplication. In
+    /// relational algebra: c = a ⊎ b.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use prela::engine::*;
+    ///
+    /// let a = VecRel::new(vec![10, 20]);
+    /// let b = VecRel::new(vec![30, 40]);
+    /// let mut out = Vec::new();
+    /// a.union(&b).drive(|d, r| out.push((d, r)));
+    /// assert_eq!(out, vec![(0, 10), (1, 20), (0, 30), (1, 40)]);
+    /// ```
     #[inline(always)]
     fn union<B: IntoQuery>(self, b: B) -> Union<Self::Q, B::Q>
     where
@@ -1830,6 +1937,22 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some value
+    /// `v`, `a.eq(v)` filters `a`, such that y<sub>a</sub> = `v`, and
+    /// produces (x, y<sub>a</sub>) unchanged for each pair that
+    /// satisfies the condition. In relational algebra: σ<sub>a.2 =
+    /// v</sub>(a).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use prela::engine::*;
+    ///
+    /// let a: VecRel<usize, usize> = VecRel::new(vec![10, 20, 30]);
+    /// let mut out = Vec::new();
+    /// a.eq(20).drive(|d, r| out.push((d, r)));
+    /// assert_eq!(out, vec![(1, 20)]);
+    /// ```
     #[inline(always)]
     fn eq(self, v: ROf<Self>) -> Filter<Self::Q, impl Fn(ROf<Self>) -> bool>
     where
@@ -1841,6 +1964,23 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some value
+    /// `v`, `a.ne(v)` filters `a`, such that y<sub>a</sub> ≠ `v`, and
+    /// produces (x, y<sub>a</sub>) unchanged for each pair that
+    /// satisfies the condition. In relational algebra: σ<sub>a.2 ≠
+    /// v</sub>(a).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use prela::engine::*;
+    ///
+    /// let a: VecRel<usize, usize> = VecRel::new(vec![10, 20, 30]);
+    /// let mut out = Vec::new();
+    /// a.ne(20).drive(|d, r| out.push((d, r)));
+    /// out.sort();
+    /// assert_eq!(out, vec![(0, 10), (2, 30)]);
+    /// ```
     #[inline(always)]
     fn ne(self, v: ROf<Self>) -> Filter<Self::Q, impl Fn(ROf<Self>) -> bool>
     where
@@ -1852,6 +1992,23 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some value
+    /// `v`, `a.gt(v)` filters `a`, such that y<sub>a</sub> &gt; `v`, and
+    /// produces (x, y<sub>a</sub>) unchanged for each pair that
+    /// satisfies the condition. In relational algebra: σ<sub>a.2 &gt;
+    /// v</sub>(a).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use prela::engine::*;
+    ///
+    /// let a: VecRel<usize, usize> = VecRel::new(vec![10, 20, 30]);
+    /// let mut out = Vec::new();
+    /// a.gt(15).drive(|d, r| out.push((d, r)));
+    /// out.sort();
+    /// assert_eq!(out, vec![(1, 20), (2, 30)]);
+    /// ```
     #[inline(always)]
     fn gt(self, v: ROf<Self>) -> Filter<Self::Q, impl Fn(ROf<Self>) -> bool>
     where
@@ -1863,6 +2020,23 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some value
+    /// `v`, `a.lt(v)` filters `a`, such that y<sub>a</sub> &lt; `v`, and
+    /// produces (x, y<sub>a</sub>) unchanged for each pair that
+    /// satisfies the condition. In relational algebra: σ<sub>a.2 &lt;
+    /// v</sub>(a).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use prela::engine::*;
+    ///
+    /// let a: VecRel<usize, usize> = VecRel::new(vec![10, 20, 30]);
+    /// let mut out = Vec::new();
+    /// a.lt(25).drive(|d, r| out.push((d, r)));
+    /// out.sort();
+    /// assert_eq!(out, vec![(0, 10), (1, 20)]);
+    /// ```
     #[inline(always)]
     fn lt(self, v: ROf<Self>) -> Filter<Self::Q, impl Fn(ROf<Self>) -> bool>
     where
@@ -1874,6 +2048,23 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some value
+    /// `v`, `a.ge(v)` filters `a`, such that y<sub>a</sub> ≥ `v`, and
+    /// produces (x, y<sub>a</sub>) unchanged for each pair that
+    /// satisfies the condition. In relational algebra: σ<sub>a.2 ≥
+    /// v</sub>(a).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use prela::engine::*;
+    ///
+    /// let a: VecRel<usize, usize> = VecRel::new(vec![10, 20, 30]);
+    /// let mut out = Vec::new();
+    /// a.ge(20).drive(|d, r| out.push((d, r)));
+    /// out.sort();
+    /// assert_eq!(out, vec![(1, 20), (2, 30)]);
+    /// ```
     #[inline(always)]
     fn ge(self, v: ROf<Self>) -> Filter<Self::Q, impl Fn(ROf<Self>) -> bool>
     where
@@ -1885,6 +2076,23 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some value
+    /// `v`, `a.le(v)` filters `a`, such that y<sub>a</sub> ≤ `v`, and
+    /// produces (x, y<sub>a</sub>) unchanged for each pair that
+    /// satisfies the condition. In relational algebra: σ<sub>a.2 ≤
+    /// v</sub>(a).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use prela::engine::*;
+    ///
+    /// let a: VecRel<usize, usize> = VecRel::new(vec![10, 20, 30]);
+    /// let mut out = Vec::new();
+    /// a.le(20).drive(|d, r| out.push((d, r)));
+    /// out.sort();
+    /// assert_eq!(out, vec![(0, 10), (1, 20)]);
+    /// ```
     #[inline(always)]
     fn le(self, v: ROf<Self>) -> Filter<Self::Q, impl Fn(ROf<Self>) -> bool>
     where
@@ -1896,6 +2104,23 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
+    /// Selection. Given relation `a` (x<sub>a</sub>, y<sub>a</sub>) and
+    /// a list of values `vs`, `a.in_v(vs)` filters `a`, such that
+    /// y<sub>a</sub> is in `vs`, producing (x<sub>a</sub>, y<sub>a</sub>)
+    /// unchanged for each pair that satisfies the condition. In
+    /// relational algebra: σ<sub>a.2 ∈ vs</sub>(a).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use prela::engine::*;
+    ///
+    /// let a: VecRel<usize, usize> = VecRel::new(vec![10, 20, 30]);
+    /// let mut out = Vec::new();
+    /// a.in_v(vec![10, 30]).drive(|d, r| out.push((d, r)));
+    /// out.sort();
+    /// assert_eq!(out, vec![(0, 10), (2, 30)]);
+    /// ```
     #[inline(always)]
     fn in_v(self, vs: Vec<ROf<Self>>) -> Filter<Self::Q, impl Fn(ROf<Self>) -> bool>
     where
@@ -1923,6 +2148,23 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
+    /// Restriction using semijoin. Given relation `a` (x, y<sub>a</sub>)
+    /// and relation `b` (y<sub>b</sub>, z), `a.with(b)` filters `a` by
+    /// `b`, such that y<sub>a</sub> = y<sub>b</sub>, and produces (x,
+    /// y<sub>a</sub>) unchanged for each match. In relational algebra:
+    /// a ⋉<sub>a.2 = b.1</sub> b.
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use prela::engine::*;
+    ///
+    /// let a = VecRel::new(vec![1, 2, 0]);
+    /// let mut out = Vec::new();
+    /// a.with(Universe::new(2)).drive(|d, r| out.push((d, r)));
+    /// out.sort();
+    /// assert_eq!(out, vec![(0, 1), (2, 0)]); // (1, 2) dropped: 2 not in {0, 1}
+    /// ```
     #[inline(always)]
     fn with<S: IntoQuery>(self, s: S) -> Restrict<Self::Q, S::Q>
     where
@@ -1934,6 +2176,22 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some regex
+    /// pattern `s`, `a.rx(s)` filters `a`, such that y<sub>a</sub>
+    /// matches `s`, and produces (x, y<sub>a</sub>) unchanged for each
+    /// pair that satisfies the condition. In relational algebra:
+    /// σ<sub>a.2 ~ s</sub>(a).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use prela::engine::*;
+    ///
+    /// let names = VecRel::new(vec!["Jaws", "Alien", "Tron"]);
+    /// let mut out = Vec::new();
+    /// names.rx("^T").drive(|d, r| out.push((d, r)));
+    /// assert_eq!(out, vec![(2, "Tron")]);
+    /// ```
     #[inline(always)]
     fn rx(self, re: &str) -> Filter<Self::Q, impl Fn(&'static str) -> bool>
     where
@@ -1946,6 +2204,23 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some regex
+    /// pattern `s`, `a.nrx(s)` filters `a`, such that y<sub>a</sub> does
+    /// not match `s`, and produces (x, y<sub>a</sub>) unchanged for each
+    /// pair that satisfies the condition. In relational algebra:
+    /// σ<sub>a.2 ≁ s</sub>(a).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use prela::engine::*;
+    ///
+    /// let names = VecRel::new(vec!["Jaws", "Alien", "Tron"]);
+    /// let mut out = Vec::new();
+    /// names.nrx("^T").drive(|d, r| out.push((d, r)));
+    /// out.sort();
+    /// assert_eq!(out, vec![(0, "Jaws"), (1, "Alien")]);
+    /// ```
     #[inline(always)]
     fn nrx(self, re: &str) -> Filter<Self::Q, impl Fn(&'static str) -> bool>
     where
@@ -1958,12 +2233,44 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and a predicate
+    /// function `f`, `a.filt(f)` filters `a`, such that f(y<sub>a</sub>)
+    /// = true, and produces (x, y<sub>a</sub>) unchanged for each pair
+    /// that satisfies the condition. In relational algebra:
+    /// σ<sub>f(a.2)</sub>(a).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use prela::engine::*;
+    ///
+    /// let a: VecRel<usize, usize> = VecRel::new(vec![10, 20, 30]);
+    /// let mut out = Vec::new();
+    /// a.filt(|v| v % 20 == 0).drive(|d, r| out.push((d, r)));
+    /// assert_eq!(out, vec![(1, 20)]);
+    /// ```
     #[inline(always)]
     fn filt<F: Fn(ROf<Self>) -> bool>(self, f: F) -> Filter<Self::Q, F> {
         Filter { a: self.iq(), p: f }
     }
 
-    /// Half-open range `[lo, hi)` — Julia `during(lo, hi)`.
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some range
+    /// `(low, high)`, `a.during(low, high)` filters `a`, such that
+    /// `low` ≤ y<sub>a</sub> &lt; `high`, and produces (x, y<sub>a</sub>)
+    /// unchanged for each pair that satisfies the condition. In
+    /// relational algebra: σ<sub>low ≤ a.2 &lt; high</sub>(a).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use prela::engine::*;
+    ///
+    /// let a: VecRel<usize, usize> = VecRel::new(vec![1999, 2010, 2001, 2008]);
+    /// let mut out = Vec::new();
+    /// a.during(2000, 2010).drive(|d, r| out.push((d, r)));
+    /// out.sort();
+    /// assert_eq!(out, vec![(2, 2001), (3, 2008)]); // 2010 excluded
+    /// ```
     #[inline(always)]
     fn during(self, lo: ROf<Self>, hi: ROf<Self>) -> Filter<Self::Q, impl Fn(ROf<Self>) -> bool>
     where
@@ -1975,7 +2282,23 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Closed range `[lo, hi]` — Julia `lo..hi`.
+    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some range
+    /// `(low, high)`, `a.between(low, high)` filters `a`, such that
+    /// `low` ≤ y<sub>a</sub> ≤ `high`, and produces (x, y<sub>a</sub>)
+    /// unchanged for each pair that satisfies the condition. In
+    /// relational algebra: σ<sub>low ≤ a.2 ≤ high</sub>(a).
+    ///
+    /// # Examples
+    ///
+    /// ```
+    /// use prela::engine::*;
+    ///
+    /// let a: VecRel<usize, usize> = VecRel::new(vec![1999, 2010, 2001, 2008]);
+    /// let mut out = Vec::new();
+    /// a.between(2000, 2010).drive(|d, r| out.push((d, r)));
+    /// out.sort();
+    /// assert_eq!(out, vec![(1, 2010), (2, 2001), (3, 2008)]); // 2010 included
+    /// ```
     #[inline(always)]
     fn between(self, lo: ROf<Self>, hi: ROf<Self>) -> Filter<Self::Q, impl Fn(ROf<Self>) -> bool>
     where
