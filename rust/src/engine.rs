@@ -1793,7 +1793,7 @@ pub trait QueryExt: IntoQuery + Sized {
     }
 
     /// [Converse](https://en.wikipedia.org/wiki/Converse_relation).
-    /// `a.inv()` produces `(y, x)` for every `(x, y)` in `a`,
+    /// `a.inv()` produces `(y, x)` for every `(x, y)` in `a`.
     ///
     /// # Examples
     ///
@@ -1814,9 +1814,9 @@ pub trait QueryExt: IntoQuery + Sized {
         InvStream { q: self.iq() }
     }
 
-    /// [Cross product](https://en.wikipedia.org/wiki/Cross_product).
-    /// For each `(x_a, y)` in `a` and `(x_b, y)` in `b` such that `x_a = x_b`,
-    /// produce a tuple `(x, (y, z))` where `x = x_a = x_b`.
+    /// Product.
+    /// For each `(x_a, y)` in `a` and `(x_b, z)` in `b` such that `x_a = x_b`,
+    /// `a.and(b)` produces a tuple `(x, (y, z))` where `x = x_a = x_b`.
     ///
     /// # Examples
     ///
@@ -1851,8 +1851,8 @@ pub trait QueryExt: IntoQuery + Sized {
     }
 
     /// Sum.
-    /// Currently only supports memership tests:
-    /// `x` is in `a.or(b)` if `x` is in either `a` or `b`.
+    /// Currently only supports membership tests:
+    /// `x` is a key in `a.or(b)` iff `x` is a key in either `a` or `b`.
     ///
     /// # Examples
     ///
@@ -1907,7 +1907,7 @@ pub trait QueryExt: IntoQuery + Sized {
 
     /// Union.
     /// Given relations `a` and `b` of the same type,
-    /// `a.union(b)` returns the bag union of `a` and `b`.
+    /// `a.union(b)` returns all tuples from `a` and `b` without deduplication.
     ///
     /// # Examples
     ///
