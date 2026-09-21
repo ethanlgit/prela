@@ -106,7 +106,7 @@ impl<T: Member + ?Sized> Member for &T {
 // `MultiRel<usize, R>` — multi-valued / partial; CSR over the dense domain:
 // row i = `v[offsets[i]..offsets[i+1]]`, empty range for a domain element
 // with no rows. The slices are `&'static` — in production they point into the
-// leaked cache mmap (zero-copy); `from_pairs` (unit tests) leaks two small
+// leaked cache mmap (zero-copy); `from_pairs` (tests, examples) leaks two small
 // Vecs to the same effect.
 
 pub const NO_ID: usize = usize::MAX;
@@ -254,8 +254,9 @@ pub struct MultiRel<D: Dense, R: Copy + 'static> {
     pub v: &'static [R],
 }
 
-#[cfg(test)]
 impl<D: Dense, R: Copy + Default> VecRel<D, R> {
+    /// Build from explicit `(id, value)` pairs over the domain `0..n`;
+    /// ids not listed get `R::default()`. For tests and examples.
     pub fn from_pairs(n: usize, pairs: impl IntoIterator<Item = (usize, R)>) -> Self {
         let mut values = vec![R::default(); n];
         for (k, v) in pairs {
@@ -282,7 +283,9 @@ impl<D: Dense, R: Copy + 'static> MultiRel<D, R> {
         self.offsets.len() - 1
     }
 
-    #[cfg(test)]
+    /// Build from explicit `(id, value)` pairs over the domain `0..n`;
+    /// an id may appear any number of times. Leaks the two backing Vecs
+    /// to obtain the `&'static` slices — for tests and examples only.
     pub fn from_pairs(n: usize, pairs: impl IntoIterator<Item = (usize, R)>) -> Self {
         let mut buckets: Vec<Vec<R>> = (0..n).map(|_| Vec::new()).collect();
         for (k, v) in pairs {
@@ -1743,23 +1746,24 @@ impl<X: Copy + Eq + Hash, S: Drive, P: Fn(X, S::D) -> bool> Probe for Scan<X, S,
 // and consume their input, exactly like prela's `build_*` inside `prepare`.
 
 pub trait QueryExt: IntoQuery + Sized {
-    /// Relational composition. Given relations `a` and `b`, `a.select(b)`
-    /// matches every tuple (x, y<sub>a</sub>) in `a` with all tuples
-    /// (y<sub>b</sub>, z) in `b` such that y<sub>a</sub> = y<sub>b</sub>,
-    /// and produces a tuple `(x, z)` for each match. In relational
-    /// algebra: π<sub>a.1, b.2</sub>(a ⋈<sub>a.2 = b.1</sub> b).
+    /// [Relation composition](https://en.wikipedia.org/wiki/Composition_of_relations).
+    /// Given relations `a` and `b`, `a.select(b)`
+    /// matches every `(x, y_a)` in `a` with all `(y_b, z)`
+    /// in `b` such that `y_a = y_b`, and produces a tuple `(x, z)` for
+    /// each match.
     ///
     /// # Examples
     ///
     /// ```
     /// use prela::engine::*;
     ///
-    /// let a = VecRel::new(vec![1, 2, 0]);
-    /// let b = VecRel::new(vec!["x", "y", "z"]);
+    /// // a = {(0, 1), (0, 2), (1, 2)}: movie id → keyword id
+    /// let a: MultiRel<usize, usize> = MultiRel::from_pairs(2, [(0, 1), (0, 2), (1, 2)]);
+    /// // b = {(0, "shark"), (1, "space"), (2, "robot")}: keyword id → keyword
+    /// let b: VecRel<usize, &str> = VecRel::from_pairs(3, [(0, "shark"), (1, "space"), (2, "robot")]);
     /// let mut out = Vec::new();
     /// a.select(&b).drive(|d, r| out.push((d, r)));
-    /// out.sort();
-    /// assert_eq!(out, vec![(0, "y"), (1, "z"), (2, "x")]);
+    /// assert_eq!(out, vec![(0, "space"), (0, "robot"), (1, "robot")]);
     /// ```
     #[inline(always)]
     fn select<B: IntoQuery>(self, b: B) -> Compose<Self::Q, B::Q>
@@ -1788,21 +1792,19 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Invert. Given relation `a` (x<sub>a</sub>, y<sub>a</sub>), where
-    /// y<sub>a</sub> is hashable, `a.inv()` swaps columns x<sub>a</sub>
-    /// and y<sub>a</sub>, producing a new relation (y<sub>a</sub>,
-    /// x<sub>a</sub>). In relational algebra: π<sub>a.2, a.1</sub>(a).
+    /// [Converse](https://en.wikipedia.org/wiki/Converse_relation).
+    /// `a.inv()` produces `(y, x)` for every `(x, y)` in `a`,
     ///
     /// # Examples
     ///
     /// ```
     /// use prela::engine::*;
     ///
-    /// let a = VecRel::new(vec![1, 2, 0]);
+    /// // a = {(0, 1), (1, 2), (2, 0)}
+    /// let a: VecRel<usize, usize> = VecRel::from_pairs(3, [(0, 1), (1, 2), (2, 0)]);
     /// let mut out = Vec::new();
     /// a.inv().drive(|d, r| out.push((d, r)));
-    /// out.sort();
-    /// assert_eq!(out, vec![(0, 2), (1, 0), (2, 1)]);
+    /// assert_eq!(out, vec![(1, 0), (2, 1), (0, 2)]);
     /// ```
     #[inline(always)]
     fn inv(self) -> InvStream<Self::Q>
@@ -1812,25 +1814,22 @@ pub trait QueryExt: IntoQuery + Sized {
         InvStream { q: self.iq() }
     }
 
-    /// Conjunction. Given relations `a` (x<sub>a</sub>, y<sub>a</sub>)
-    /// and `b` (x<sub>b</sub>, y<sub>b</sub>), where type(x<sub>a</sub>)
-    /// = type(x<sub>b</sub>), `a.and(b)` combines `a` and `b`, such that
-    /// x<sub>a</sub> = x<sub>b</sub>, and produces (x<sub>a</sub>,
-    /// (y<sub>a</sub>, y<sub>b</sub>)) for each match. Used both as
-    /// logical AND, and as multi-column projection. In relational
-    /// algebra: π<sub>a.1, a.2, b.2</sub>(a ⋈<sub>a.1 = b.1</sub> b).
+    /// [Cross product](https://en.wikipedia.org/wiki/Cross_product).
+    /// For each `(x_a, y)` in `a` and `(x_b, y)` in `b` such that `x_a = x_b`,
+    /// produce a tuple `(x, (y, z))` where `x = x_a = x_b`.
     ///
     /// # Examples
     ///
     /// ```
     /// use prela::engine::*;
     ///
-    /// let a = VecRel::new(vec![1, 2, 0]);
-    /// let b = VecRel::new(vec!["x", "y", "z"]);
+    /// // a = {(0, 1975), (1, 1979), (2, 1982)}: movie id → year
+    /// let a: VecRel<usize, usize> = VecRel::from_pairs(3, [(0, 1975), (1, 1979), (2, 1982)]);
+    /// // b = {(0, "Jaws"), (1, "Alien"), (2, "Tron")}: movie id → title
+    /// let b: VecRel<usize, &str> = VecRel::from_pairs(3, [(0, "Jaws"), (1, "Alien"), (2, "Tron")]);
     /// let mut out = Vec::new();
     /// a.and(&b).drive(|d, r| out.push((d, r)));
-    /// out.sort();
-    /// assert_eq!(out, vec![(0, (1, "x")), (1, (2, "y")), (2, (0, "z"))]);
+    /// assert_eq!(out, vec![(0, (1975, "Jaws")), (1, (1979, "Alien")), (2, (1982, "Tron"))]);
     /// ```
     #[inline(always)]
     fn and<B: IntoQuery>(self, b: B) -> Prod<Self::Q, B::Q>
@@ -1851,22 +1850,21 @@ pub trait QueryExt: IntoQuery + Sized {
         Opt { q: self.iq() }
     }
 
-    /// Disjunction. Given relations `a` (x<sub>a</sub>, y<sub>a</sub>)
-    /// and `b` (x<sub>b</sub>, y<sub>b</sub>), `a.or(b)` checks for
-    /// membership, such that for any value `v`, `v` equals any
-    /// x<sub>a</sub> or `v` equals any x<sub>b</sub>, and produces
-    /// boolean value `True` if a match occurs, and `False` otherwise.
-    /// In relational algebra: π<sub>a.1</sub>(a) ∪ π<sub>b.1</sub>(b).
+    /// Sum.
+    /// Currently only supports memership tests:
+    /// `x` is in `a.or(b)` if `x` is in either `a` or `b`.
     ///
     /// # Examples
     ///
     /// ```
     /// use prela::engine::*;
     ///
-    /// let a = VecRel::new(vec![10, 20]);
-    /// let b = VecRel::new(vec![30, 40, 50]);
-    /// assert!((&a).or(&b).member(2));  // in b's domain {0, 1, 2}
-    /// assert!(!(&a).or(&b).member(5)); // in neither domain
+    /// // a = {(0, 1975), (1, 1979)}: movie id → year
+    /// let a: VecRel<usize, usize> = VecRel::from_pairs(2, [(0, 1975), (1, 1979)]);
+    /// // b = {(0, "Jaws"), (1, "Alien"), (2, "Tron")}: movie id → title
+    /// let b: VecRel<usize, &str> = VecRel::from_pairs(3, [(0, "Jaws"), (1, "Alien"), (2, "Tron")]);
+    /// assert!((&a).or(&b).member(2));  // 2 is a key of b
+    /// assert!(!(&a).or(&b).member(5)); // 5 is a key of neither
     /// ```
     #[inline(always)]
     fn or<B: IntoQuery>(self, b: B) -> Disj<Self::Q, B::Q>
@@ -1879,23 +1877,22 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Minus. Given relations `a` (x<sub>a</sub>, y<sub>a</sub>) and `b`
-    /// (x<sub>b</sub>, y<sub>b</sub>), where type(x<sub>a</sub>) =
-    /// type(x<sub>b</sub>), `a.minus(b)` filters `a`, such that
-    /// x<sub>a</sub> does not equal any x<sub>b</sub>, and produces
-    /// (x<sub>a</sub>, y<sub>a</sub>) unchanged for each pair that
-    /// satisfies the condition. In relational algebra: a ▷<sub>a.1 =
-    /// b.1</sub> b.
+    /// Difference.
+    /// `a.minus(b)` removes every tuple `(x, y_a)` in `a`
+    /// such that `(x, y_b)` appears in `b` for some `y_b`.
     ///
     /// # Examples
     ///
     /// ```
     /// use prela::engine::*;
     ///
-    /// let a: VecRel<usize, usize> = VecRel::new(vec![10, 20, 30]);
+    /// // a = {(0, "Jaws"), (1, "Alien"), (2, "Tron")}: movie id → title
+    /// let a: VecRel<usize, &str> = VecRel::from_pairs(3, [(0, "Jaws"), (1, "Alien"), (2, "Tron")]);
+    /// // b = {(0, 1975), (1, 1979)}: movie id → year
+    /// let b: VecRel<usize, usize> = VecRel::from_pairs(2, [(0, 1975), (1, 1979)]);
     /// let mut out = Vec::new();
-    /// a.minus(Universe::new(2)).drive(|d, r| out.push((d, r)));
-    /// assert_eq!(out, vec![(2, 30)]); // keys 0, 1 dropped: both in {0, 1}
+    /// a.minus(&b).drive(|d, r| out.push((d, r)));
+    /// assert_eq!(out, vec![(2, "Tron")]); // keys 0 and 1 also occur in b
     /// ```
     #[inline(always)]
     fn minus<B: IntoQuery>(self, b: B) -> Diff<Self::Q, B::Q>
@@ -1908,23 +1905,21 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Union. Given relations `a` (x<sub>a</sub>, y<sub>a</sub>) and `b`
-    /// (x<sub>b</sub>, y<sub>b</sub>), where type(x<sub>a</sub>) =
-    /// type(x<sub>b</sub>) and type(y<sub>a</sub>) = type(y<sub>b</sub>),
-    /// `a.union(b)` concatenates `a` and `b`, producing every pair from
-    /// `a`, then every pair from `b`, without deduplication. In
-    /// relational algebra: c = a ⊎ b.
+    /// Union.
+    /// Given relations `a` and `b` of the same type,
+    /// `a.union(b)` returns the bag union of `a` and `b`.
     ///
     /// # Examples
     ///
     /// ```
     /// use prela::engine::*;
     ///
-    /// let a = VecRel::new(vec![10, 20]);
-    /// let b = VecRel::new(vec![30, 40]);
+    /// // a = {(0, "Jaws"), (1, "Alien")}; b = {(0, "Tron"), (1, "Alien")}
+    /// let a: VecRel<usize, &str> = VecRel::from_pairs(2, [(0, "Jaws"), (1, "Alien")]);
+    /// let b: VecRel<usize, &str> = VecRel::from_pairs(2, [(0, "Tron"), (1, "Alien")]);
     /// let mut out = Vec::new();
     /// a.union(&b).drive(|d, r| out.push((d, r)));
-    /// assert_eq!(out, vec![(0, 10), (1, 20), (0, 30), (1, 40)]);
+    /// assert_eq!(out, vec![(0, "Jaws"), (1, "Alien"), (0, "Tron"), (1, "Alien")]);
     /// ```
     #[inline(always)]
     fn union<B: IntoQuery>(self, b: B) -> Union<Self::Q, B::Q>
@@ -1937,21 +1932,18 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some value
-    /// `v`, `a.eq(v)` filters `a`, such that y<sub>a</sub> = `v`, and
-    /// produces (x, y<sub>a</sub>) unchanged for each pair that
-    /// satisfies the condition. In relational algebra: σ<sub>a.2 =
-    /// v</sub>(a).
+    /// `a.eq(v)` keeps every `(x, y)` in `a` such that `y = v`.
     ///
     /// # Examples
     ///
     /// ```
     /// use prela::engine::*;
     ///
-    /// let a: VecRel<usize, usize> = VecRel::new(vec![10, 20, 30]);
+    /// // a = {(0, 1975), (1, 1979), (2, 1982)}: movie id → year
+    /// let a: VecRel<usize, usize> = VecRel::from_pairs(3, [(0, 1975), (1, 1979), (2, 1982)]);
     /// let mut out = Vec::new();
-    /// a.eq(20).drive(|d, r| out.push((d, r)));
-    /// assert_eq!(out, vec![(1, 20)]);
+    /// a.eq(1979).drive(|d, r| out.push((d, r)));
+    /// assert_eq!(out, vec![(1, 1979)]);
     /// ```
     #[inline(always)]
     fn eq(self, v: ROf<Self>) -> Filter<Self::Q, impl Fn(ROf<Self>) -> bool>
@@ -1964,22 +1956,18 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some value
-    /// `v`, `a.ne(v)` filters `a`, such that y<sub>a</sub> ≠ `v`, and
-    /// produces (x, y<sub>a</sub>) unchanged for each pair that
-    /// satisfies the condition. In relational algebra: σ<sub>a.2 ≠
-    /// v</sub>(a).
+    /// `a.ne(v)` keeps every `(x, y)` in `a` such that `y ≠ v`.
     ///
     /// # Examples
     ///
     /// ```
     /// use prela::engine::*;
     ///
-    /// let a: VecRel<usize, usize> = VecRel::new(vec![10, 20, 30]);
+    /// // a = {(0, 1975), (1, 1979), (2, 1982)}: movie id → year
+    /// let a: VecRel<usize, usize> = VecRel::from_pairs(3, [(0, 1975), (1, 1979), (2, 1982)]);
     /// let mut out = Vec::new();
-    /// a.ne(20).drive(|d, r| out.push((d, r)));
-    /// out.sort();
-    /// assert_eq!(out, vec![(0, 10), (2, 30)]);
+    /// a.ne(1979).drive(|d, r| out.push((d, r)));
+    /// assert_eq!(out, vec![(0, 1975), (2, 1982)]);
     /// ```
     #[inline(always)]
     fn ne(self, v: ROf<Self>) -> Filter<Self::Q, impl Fn(ROf<Self>) -> bool>
@@ -1992,22 +1980,18 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some value
-    /// `v`, `a.gt(v)` filters `a`, such that y<sub>a</sub> &gt; `v`, and
-    /// produces (x, y<sub>a</sub>) unchanged for each pair that
-    /// satisfies the condition. In relational algebra: σ<sub>a.2 &gt;
-    /// v</sub>(a).
+    /// `a.gt(v)` keeps every `(x, y)` in `a` such that `y > v`.
     ///
     /// # Examples
     ///
     /// ```
     /// use prela::engine::*;
     ///
-    /// let a: VecRel<usize, usize> = VecRel::new(vec![10, 20, 30]);
+    /// // a = {(0, 1975), (1, 1979), (2, 1982)}: movie id → year
+    /// let a: VecRel<usize, usize> = VecRel::from_pairs(3, [(0, 1975), (1, 1979), (2, 1982)]);
     /// let mut out = Vec::new();
-    /// a.gt(15).drive(|d, r| out.push((d, r)));
-    /// out.sort();
-    /// assert_eq!(out, vec![(1, 20), (2, 30)]);
+    /// a.gt(1979).drive(|d, r| out.push((d, r)));
+    /// assert_eq!(out, vec![(2, 1982)]);
     /// ```
     #[inline(always)]
     fn gt(self, v: ROf<Self>) -> Filter<Self::Q, impl Fn(ROf<Self>) -> bool>
@@ -2020,22 +2004,18 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some value
-    /// `v`, `a.lt(v)` filters `a`, such that y<sub>a</sub> &lt; `v`, and
-    /// produces (x, y<sub>a</sub>) unchanged for each pair that
-    /// satisfies the condition. In relational algebra: σ<sub>a.2 &lt;
-    /// v</sub>(a).
+    /// `a.lt(v)` keeps every `(x, y)` in `a` such that `y < v`.
     ///
     /// # Examples
     ///
     /// ```
     /// use prela::engine::*;
     ///
-    /// let a: VecRel<usize, usize> = VecRel::new(vec![10, 20, 30]);
+    /// // a = {(0, 1975), (1, 1979), (2, 1982)}: movie id → year
+    /// let a: VecRel<usize, usize> = VecRel::from_pairs(3, [(0, 1975), (1, 1979), (2, 1982)]);
     /// let mut out = Vec::new();
-    /// a.lt(25).drive(|d, r| out.push((d, r)));
-    /// out.sort();
-    /// assert_eq!(out, vec![(0, 10), (1, 20)]);
+    /// a.lt(1979).drive(|d, r| out.push((d, r)));
+    /// assert_eq!(out, vec![(0, 1975)]);
     /// ```
     #[inline(always)]
     fn lt(self, v: ROf<Self>) -> Filter<Self::Q, impl Fn(ROf<Self>) -> bool>
@@ -2048,22 +2028,18 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some value
-    /// `v`, `a.ge(v)` filters `a`, such that y<sub>a</sub> ≥ `v`, and
-    /// produces (x, y<sub>a</sub>) unchanged for each pair that
-    /// satisfies the condition. In relational algebra: σ<sub>a.2 ≥
-    /// v</sub>(a).
+    /// `a.ge(v)` keeps every `(x, y)` in `a` such that `y ≥ v`.
     ///
     /// # Examples
     ///
     /// ```
     /// use prela::engine::*;
     ///
-    /// let a: VecRel<usize, usize> = VecRel::new(vec![10, 20, 30]);
+    /// // a = {(0, 1975), (1, 1979), (2, 1982)}: movie id → year
+    /// let a: VecRel<usize, usize> = VecRel::from_pairs(3, [(0, 1975), (1, 1979), (2, 1982)]);
     /// let mut out = Vec::new();
-    /// a.ge(20).drive(|d, r| out.push((d, r)));
-    /// out.sort();
-    /// assert_eq!(out, vec![(1, 20), (2, 30)]);
+    /// a.ge(1979).drive(|d, r| out.push((d, r)));
+    /// assert_eq!(out, vec![(1, 1979), (2, 1982)]);
     /// ```
     #[inline(always)]
     fn ge(self, v: ROf<Self>) -> Filter<Self::Q, impl Fn(ROf<Self>) -> bool>
@@ -2076,22 +2052,18 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some value
-    /// `v`, `a.le(v)` filters `a`, such that y<sub>a</sub> ≤ `v`, and
-    /// produces (x, y<sub>a</sub>) unchanged for each pair that
-    /// satisfies the condition. In relational algebra: σ<sub>a.2 ≤
-    /// v</sub>(a).
+    /// `a.le(v)` keeps every `(x, y)` in `a` such that `y ≤ v`.
     ///
     /// # Examples
     ///
     /// ```
     /// use prela::engine::*;
     ///
-    /// let a: VecRel<usize, usize> = VecRel::new(vec![10, 20, 30]);
+    /// // a = {(0, 1975), (1, 1979), (2, 1982)}: movie id → year
+    /// let a: VecRel<usize, usize> = VecRel::from_pairs(3, [(0, 1975), (1, 1979), (2, 1982)]);
     /// let mut out = Vec::new();
-    /// a.le(20).drive(|d, r| out.push((d, r)));
-    /// out.sort();
-    /// assert_eq!(out, vec![(0, 10), (1, 20)]);
+    /// a.le(1979).drive(|d, r| out.push((d, r)));
+    /// assert_eq!(out, vec![(0, 1975), (1, 1979)]);
     /// ```
     #[inline(always)]
     fn le(self, v: ROf<Self>) -> Filter<Self::Q, impl Fn(ROf<Self>) -> bool>
@@ -2104,22 +2076,18 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Selection. Given relation `a` (x<sub>a</sub>, y<sub>a</sub>) and
-    /// a list of values `vs`, `a.in_v(vs)` filters `a`, such that
-    /// y<sub>a</sub> is in `vs`, producing (x<sub>a</sub>, y<sub>a</sub>)
-    /// unchanged for each pair that satisfies the condition. In
-    /// relational algebra: σ<sub>a.2 ∈ vs</sub>(a).
+    /// `a.in_v(vs)` keeps every `(x, y)` in `a` such that `y` is in `vs`.
     ///
     /// # Examples
     ///
     /// ```
     /// use prela::engine::*;
     ///
-    /// let a: VecRel<usize, usize> = VecRel::new(vec![10, 20, 30]);
+    /// // a = {(0, 1975), (1, 1979), (2, 1982)}: movie id → year
+    /// let a: VecRel<usize, usize> = VecRel::from_pairs(3, [(0, 1975), (1, 1979), (2, 1982)]);
     /// let mut out = Vec::new();
-    /// a.in_v(vec![10, 30]).drive(|d, r| out.push((d, r)));
-    /// out.sort();
-    /// assert_eq!(out, vec![(0, 10), (2, 30)]);
+    /// a.in_v(vec![1975, 1982]).drive(|d, r| out.push((d, r)));
+    /// assert_eq!(out, vec![(0, 1975), (2, 1982)]);
     /// ```
     #[inline(always)]
     fn in_v(self, vs: Vec<ROf<Self>>) -> Filter<Self::Q, impl Fn(ROf<Self>) -> bool>
@@ -2148,22 +2116,22 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Restriction using semijoin. Given relation `a` (x, y<sub>a</sub>)
-    /// and relation `b` (y<sub>b</sub>, z), `a.with(b)` filters `a` by
-    /// `b`, such that y<sub>a</sub> = y<sub>b</sub>, and produces (x,
-    /// y<sub>a</sub>) unchanged for each match. In relational algebra:
-    /// a ⋉<sub>a.2 = b.1</sub> b.
+    /// Semijoin.
+    /// `a.with(b)` keeps every `(x, y)` in `a`
+    /// such that `(y, z)` appears in `b` for some `z`.
     ///
     /// # Examples
     ///
     /// ```
     /// use prela::engine::*;
     ///
-    /// let a = VecRel::new(vec![1, 2, 0]);
+    /// // a = {(0, 1), (0, 2), (1, 2)}: movie id → keyword id
+    /// let a: MultiRel<usize, usize> = MultiRel::from_pairs(2, [(0, 1), (0, 2), (1, 2)]);
+    /// // b = {(0, "shark"), (1, "space")}: keyword id → keyword
+    /// let b: VecRel<usize, &str> = VecRel::from_pairs(2, [(0, "shark"), (1, "space")]);
     /// let mut out = Vec::new();
-    /// a.with(Universe::new(2)).drive(|d, r| out.push((d, r)));
-    /// out.sort();
-    /// assert_eq!(out, vec![(0, 1), (2, 0)]); // (1, 2) dropped: 2 not in {0, 1}
+    /// a.with(&b).drive(|d, r| out.push((d, r)));
+    /// assert_eq!(out, vec![(0, 1)]); // (0, 2) and (1, 2) dropped: 2 is not a key of b
     /// ```
     #[inline(always)]
     fn with<S: IntoQuery>(self, s: S) -> Restrict<Self::Q, S::Q>
@@ -2176,20 +2144,17 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some regex
-    /// pattern `s`, `a.rx(s)` filters `a`, such that y<sub>a</sub>
-    /// matches `s`, and produces (x, y<sub>a</sub>) unchanged for each
-    /// pair that satisfies the condition. In relational algebra:
-    /// σ<sub>a.2 ~ s</sub>(a).
+    /// `a.rx(s)` keeps every `(x, y)` in `a` such that `y` matches the regex `s`.
     ///
     /// # Examples
     ///
     /// ```
     /// use prela::engine::*;
     ///
-    /// let names = VecRel::new(vec!["Jaws", "Alien", "Tron"]);
+    /// // a = {(0, "Jaws"), (1, "Alien"), (2, "Tron")}: movie id → title
+    /// let a: VecRel<usize, &str> = VecRel::from_pairs(3, [(0, "Jaws"), (1, "Alien"), (2, "Tron")]);
     /// let mut out = Vec::new();
-    /// names.rx("^T").drive(|d, r| out.push((d, r)));
+    /// a.rx("^T").drive(|d, r| out.push((d, r)));
     /// assert_eq!(out, vec![(2, "Tron")]);
     /// ```
     #[inline(always)]
@@ -2204,21 +2169,17 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some regex
-    /// pattern `s`, `a.nrx(s)` filters `a`, such that y<sub>a</sub> does
-    /// not match `s`, and produces (x, y<sub>a</sub>) unchanged for each
-    /// pair that satisfies the condition. In relational algebra:
-    /// σ<sub>a.2 ≁ s</sub>(a).
+    /// `a.nrx(s)` keeps every `(x, y)` in `a` such that `y` does not match the regex `s`.
     ///
     /// # Examples
     ///
     /// ```
     /// use prela::engine::*;
     ///
-    /// let names = VecRel::new(vec!["Jaws", "Alien", "Tron"]);
+    /// // a = {(0, "Jaws"), (1, "Alien"), (2, "Tron")}: movie id → title
+    /// let a: VecRel<usize, &str> = VecRel::from_pairs(3, [(0, "Jaws"), (1, "Alien"), (2, "Tron")]);
     /// let mut out = Vec::new();
-    /// names.nrx("^T").drive(|d, r| out.push((d, r)));
-    /// out.sort();
+    /// a.nrx("^T").drive(|d, r| out.push((d, r)));
     /// assert_eq!(out, vec![(0, "Jaws"), (1, "Alien")]);
     /// ```
     #[inline(always)]
@@ -2233,43 +2194,36 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Selection. Given relation `a` (x, y<sub>a</sub>) and a predicate
-    /// function `f`, `a.filt(f)` filters `a`, such that f(y<sub>a</sub>)
-    /// = true, and produces (x, y<sub>a</sub>) unchanged for each pair
-    /// that satisfies the condition. In relational algebra:
-    /// σ<sub>f(a.2)</sub>(a).
+    /// `a.filt(f)` keeps every `(x, y)` in `a` such that `f(y)` is `true`.
     ///
     /// # Examples
     ///
     /// ```
     /// use prela::engine::*;
     ///
-    /// let a: VecRel<usize, usize> = VecRel::new(vec![10, 20, 30]);
+    /// // a = {(0, 1975), (1, 1979), (2, 1982)}: movie id → year
+    /// let a: VecRel<usize, usize> = VecRel::from_pairs(3, [(0, 1975), (1, 1979), (2, 1982)]);
     /// let mut out = Vec::new();
-    /// a.filt(|v| v % 20 == 0).drive(|d, r| out.push((d, r)));
-    /// assert_eq!(out, vec![(1, 20)]);
+    /// a.filt(|year| year % 2 == 0).drive(|d, r| out.push((d, r)));
+    /// assert_eq!(out, vec![(2, 1982)]);
     /// ```
     #[inline(always)]
     fn filt<F: Fn(ROf<Self>) -> bool>(self, f: F) -> Filter<Self::Q, F> {
         Filter { a: self.iq(), p: f }
     }
 
-    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some range
-    /// `(low, high)`, `a.during(low, high)` filters `a`, such that
-    /// `low` ≤ y<sub>a</sub> &lt; `high`, and produces (x, y<sub>a</sub>)
-    /// unchanged for each pair that satisfies the condition. In
-    /// relational algebra: σ<sub>low ≤ a.2 &lt; high</sub>(a).
+    /// `a.during(low, high)` keeps every `(x, y)` in `a` such that `low ≤ y < high`.
     ///
     /// # Examples
     ///
     /// ```
     /// use prela::engine::*;
     ///
-    /// let a: VecRel<usize, usize> = VecRel::new(vec![1999, 2010, 2001, 2008]);
+    /// // a = {(0, 1975), (1, 1979), (2, 1982), (3, 2010)}: movie id → year
+    /// let a: VecRel<usize, usize> = VecRel::from_pairs(4, [(0, 1975), (1, 1979), (2, 1982), (3, 2010)]);
     /// let mut out = Vec::new();
-    /// a.during(2000, 2010).drive(|d, r| out.push((d, r)));
-    /// out.sort();
-    /// assert_eq!(out, vec![(2, 2001), (3, 2008)]); // 2010 excluded
+    /// a.during(1979, 2010).drive(|d, r| out.push((d, r)));
+    /// assert_eq!(out, vec![(1, 1979), (2, 1982)]); // 2010 excluded
     /// ```
     #[inline(always)]
     fn during(self, lo: ROf<Self>, hi: ROf<Self>) -> Filter<Self::Q, impl Fn(ROf<Self>) -> bool>
@@ -2282,22 +2236,18 @@ pub trait QueryExt: IntoQuery + Sized {
         }
     }
 
-    /// Selection. Given relation `a` (x, y<sub>a</sub>) and some range
-    /// `(low, high)`, `a.between(low, high)` filters `a`, such that
-    /// `low` ≤ y<sub>a</sub> ≤ `high`, and produces (x, y<sub>a</sub>)
-    /// unchanged for each pair that satisfies the condition. In
-    /// relational algebra: σ<sub>low ≤ a.2 ≤ high</sub>(a).
+    /// `a.between(low, high)` keeps every `(x, y)` in `a` such that `low ≤ y ≤ high`.
     ///
     /// # Examples
     ///
     /// ```
     /// use prela::engine::*;
     ///
-    /// let a: VecRel<usize, usize> = VecRel::new(vec![1999, 2010, 2001, 2008]);
+    /// // a = {(0, 1975), (1, 1979), (2, 1982), (3, 2010)}: movie id → year
+    /// let a: VecRel<usize, usize> = VecRel::from_pairs(4, [(0, 1975), (1, 1979), (2, 1982), (3, 2010)]);
     /// let mut out = Vec::new();
-    /// a.between(2000, 2010).drive(|d, r| out.push((d, r)));
-    /// out.sort();
-    /// assert_eq!(out, vec![(1, 2010), (2, 2001), (3, 2008)]); // 2010 included
+    /// a.between(1979, 2010).drive(|d, r| out.push((d, r)));
+    /// assert_eq!(out, vec![(1, 1979), (2, 1982), (3, 2010)]); // 2010 included
     /// ```
     #[inline(always)]
     fn between(self, lo: ROf<Self>, hi: ROf<Self>) -> Filter<Self::Q, impl Fn(ROf<Self>) -> bool>
